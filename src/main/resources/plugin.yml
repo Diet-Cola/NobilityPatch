@@ -1,0 +1,7 @@
+name: NobilityPatch
+version: ${project.version}
+main: net.civex4.nobilitypatch.NobilityPatch
+api-version: 1.16
+prefix: NobilityPatch
+authors: [ Earthcomputer ]
+description: Library plugin to transform vanilla classes
