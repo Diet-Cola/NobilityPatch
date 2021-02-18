@@ -99,7 +99,7 @@ public final class NobilityPatch extends JavaPlugin {
                 return writer.toByteArray();
             }
         };
-        instrumentation.addTransformer(classFileTransformer);
+        instrumentation.addTransformer(classFileTransformer, true);
         try {
             instrumentation.retransformClasses(clazz);
         } catch (UnmodifiableClassException e) {
