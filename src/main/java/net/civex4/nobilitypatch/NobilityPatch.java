@@ -9,6 +9,7 @@ import net.bytebuddy.jar.asm.MethodVisitor;
 import net.bytebuddy.jar.asm.Opcodes;
 import net.bytebuddy.jar.asm.Type;
 import org.bukkit.Bukkit;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -33,6 +34,8 @@ import java.util.logging.Level;
 
 // https://github.com/Devan-Kerman/GrossFabricHacks/blob/master/src/main/java/net/devtech/grossfabrichacks/instrumentation/InstrumentationApi.java
 public final class NobilityPatch extends JavaPlugin {
+    private static final boolean EXPORT_CLASSES = Boolean.getBoolean("nobilityPatch.debug.export");
+
     private static final String AGENT_CLASS_NAME = "net.civex4.nobilitypatch.Agent";
 
     static Instrumentation instrumentation;
@@ -100,7 +103,11 @@ public final class NobilityPatch extends JavaPlugin {
                 ClassWriter writer = new ClassWriter(0);
                 ClassVisitor visitor = transformer.apply(writer);
                 reader.accept(visitor, 0);
-                return writer.toByteArray();
+                byte[] bytes = writer.toByteArray();
+                if (EXPORT_CLASSES) {
+                    exportClass(className, bytes);
+                }
+                return bytes;
             }
         };
         instrumentation.addTransformer(classFileTransformer, true);
@@ -139,11 +146,48 @@ public final class NobilityPatch extends JavaPlugin {
         });
     }
 
+    @SuppressWarnings("unchecked")
+    public static <T> CallbackKey<T> registerCallback(T callbackInstance) {
+        CallbackKey<T> key = new CallbackKey<>((Class<? extends T>) callbackInstance.getClass());
+        transform(Bukkit.class, visitor -> new ClassVisitor(Opcodes.ASM9, visitor) {
+            @Override
+            public void visit(int version, int access, String name, String signature, String superName, String[] interfaces) {
+                cv.visit(version, access, name, signature, superName, interfaces);
+                cv.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, key.getFieldName(), Type.getDescriptor(Object.class), null, null);
+            }
+        });
+        try {
+            Bukkit.class.getField(key.getFieldName()).set(null, callbackInstance);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException("Failed to register callback", e);
+        }
+        return key;
+    }
+
+    public static void loadCallback(MethodVisitor mv, CallbackKey<?> key) {
+        mv.visitFieldInsn(Opcodes.GETSTATIC, Type.getInternalName(Bukkit.class), key.getFieldName(), Type.getDescriptor(Object.class));
+        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(key.getType()));
+    }
+
     @Override
     public void onEnable() {
     }
 
     @Override
     public void onDisable() {
+    }
+
+    private static void exportClass(String internalName, byte[] bytes) {
+        Plugin plugin = Bukkit.getPluginManager().getPlugin("NobilityPatch");
+        assert plugin != null;
+        Path basePath = plugin.getDataFolder().toPath().resolve("exportedClasses");
+        int slashIndex = internalName.lastIndexOf('/');
+        Path dir = slashIndex == -1 ? basePath : basePath.resolve(internalName.substring(0, slashIndex).replace('/', File.separatorChar));
+        try {
+            Files.createDirectories(dir);
+            Files.write(dir.resolve(internalName.substring(slashIndex + 1) + ".class"), bytes);
+        } catch (IOException e) {
+            Bukkit.getLogger().log(Level.WARNING, "Failed to export class " + internalName, e);
+        }
     }
 }
