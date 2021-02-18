@@ -5,6 +5,9 @@ import net.bytebuddy.agent.ByteBuddyAgent;
 import net.bytebuddy.jar.asm.ClassReader;
 import net.bytebuddy.jar.asm.ClassVisitor;
 import net.bytebuddy.jar.asm.ClassWriter;
+import net.bytebuddy.jar.asm.MethodVisitor;
+import net.bytebuddy.jar.asm.Opcodes;
+import net.bytebuddy.jar.asm.Type;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -15,6 +18,7 @@ import java.lang.instrument.Instrumentation;
 import java.lang.instrument.UnmodifiableClassException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -106,6 +110,33 @@ public final class NobilityPatch extends JavaPlugin {
             Bukkit.getLogger().log(Level.SEVERE, "Could not transform unmodifiable class " + clazz.getName(), e);
         }
         instrumentation.removeTransformer(classFileTransformer);
+    }
+
+    public static void transformMethod(Method method, UnaryOperator<MethodVisitor> methodTransformer) {
+        transformMethod(method.getDeclaringClass(), method.getName(), Type.getMethodDescriptor(method), methodTransformer);
+    }
+
+    public static void transformMethod(Class<?> clazz, String name, String desc, UnaryOperator<MethodVisitor> methodTransformer) {
+        transform(clazz, visitor -> new ClassVisitor(Opcodes.ASM9, visitor) {
+            boolean transformed = false;
+            @Override
+            public MethodVisitor visitMethod(int access, String methodName, String descriptor, String signature, String[] exceptions) {
+                if (name.equals(methodName) && desc.equals(descriptor)) {
+                    transformed = true;
+                    return methodTransformer.apply(cv.visitMethod(access, methodName, descriptor, signature, exceptions));
+                } else {
+                    return cv.visitMethod(access, methodName, descriptor, signature, exceptions);
+                }
+            }
+
+            @Override
+            public void visitEnd() {
+                if (!transformed) {
+                    throw new IllegalStateException("Could not find method " + name + desc);
+                }
+                cv.visitEnd();
+            }
+        });
     }
 
     @Override
