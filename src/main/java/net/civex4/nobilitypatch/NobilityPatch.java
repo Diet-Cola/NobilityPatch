@@ -110,7 +110,6 @@ public final class NobilityPatch extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        TestTransformer.apply();
     }
 
     @Override
