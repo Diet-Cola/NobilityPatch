@@ -106,7 +106,7 @@ public final class NobilityPatch extends JavaPlugin {
 
         Bukkit.getLogger().log(Level.INFO, "Successfully attached instrumentation agent.");
 
-        Files.delete(jarPath);
+        jarFile.deleteOnExit();
 
         Class<?> agentClass = Class.forName(AGENT_CLASS_NAME, false, Bukkit.class.getClassLoader());
         Field field = agentClass.getDeclaredField("instrumentation");
