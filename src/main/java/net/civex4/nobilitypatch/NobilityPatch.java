@@ -132,9 +132,9 @@ public final class NobilityPatch extends JavaPlugin {
                     return classfileBuffer;
                 }
                 ClassReader reader = new ClassReader(classfileBuffer);
-                ClassWriter writer = new ClassWriter(0);
+                ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_FRAMES);
                 ClassVisitor visitor = transformer.apply(writer);
-                reader.accept(visitor, 0);
+                reader.accept(visitor, ClassReader.SKIP_FRAMES);
                 byte[] bytes = writer.toByteArray();
                 if (EXPORT_CLASSES) {
                     exportClass(className, bytes);
