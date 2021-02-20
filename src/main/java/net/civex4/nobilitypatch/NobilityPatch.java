@@ -1,13 +1,32 @@
 package net.civex4.nobilitypatch;
 
 import com.google.common.io.ByteStreams;
+import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.agent.ByteBuddyAgent;
+import net.bytebuddy.description.method.MethodDescription;
+import net.bytebuddy.description.type.TypeDescription;
+import net.bytebuddy.dynamic.DynamicType;
+import net.bytebuddy.dynamic.scaffold.InstrumentedType;
+import net.bytebuddy.implementation.Implementation;
+import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
+import net.bytebuddy.implementation.bytecode.Duplication;
+import net.bytebuddy.implementation.bytecode.StackManipulation;
+import net.bytebuddy.implementation.bytecode.StackSize;
+import net.bytebuddy.implementation.bytecode.assign.TypeCasting;
+import net.bytebuddy.implementation.bytecode.collection.ArrayAccess;
+import net.bytebuddy.implementation.bytecode.constant.IntegerConstant;
+import net.bytebuddy.implementation.bytecode.constant.NullConstant;
+import net.bytebuddy.implementation.bytecode.member.FieldAccess;
+import net.bytebuddy.implementation.bytecode.member.MethodInvocation;
+import net.bytebuddy.implementation.bytecode.member.MethodReturn;
+import net.bytebuddy.implementation.bytecode.member.MethodVariableAccess;
 import net.bytebuddy.jar.asm.ClassReader;
 import net.bytebuddy.jar.asm.ClassVisitor;
 import net.bytebuddy.jar.asm.ClassWriter;
 import net.bytebuddy.jar.asm.MethodVisitor;
 import net.bytebuddy.jar.asm.Opcodes;
 import net.bytebuddy.jar.asm.Type;
+import net.bytebuddy.matcher.ElementMatchers;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -20,10 +39,14 @@ import java.lang.instrument.UnmodifiableClassException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.ProtectionDomain;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -146,27 +169,134 @@ public final class NobilityPatch extends JavaPlugin {
         });
     }
 
-    @SuppressWarnings("unchecked")
-    public static <T> CallbackKey<T> registerCallback(T callbackInstance) {
-        CallbackKey<T> key = new CallbackKey<>((Class<? extends T>) callbackInstance.getClass());
-        transform(Bukkit.class, visitor -> new ClassVisitor(Opcodes.ASM9, visitor) {
-            @Override
-            public void visit(int version, int access, String name, String signature, String superName, String[] interfaces) {
-                cv.visit(version, access, name, signature, superName, interfaces);
-                cv.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, key.getFieldName(), Type.getDescriptor(Object.class), null, null);
-            }
-        });
+    @SuppressWarnings("rawtypes")
+    public static <T> CallbackKey<T> registerCallback(Class<T> interfaceType, T callbackInstance) {
+        CallbackKey<T> key = new CallbackKey<>(interfaceType);
+
         try {
-            Bukkit.class.getField(key.getFieldName()).set(null, callbackInstance);
+            Class<?> agentClass = Class.forName(AGENT_CLASS_NAME, false, Bukkit.class.getClassLoader());
+            Field callbackArgumentCacheField = agentClass.getField("callbackArgumentCache");
+            Object[] existingCallbackArgumentCache = (Object[]) callbackArgumentCacheField.get(null);
+
+            Method functionalMethod = key.getFunctionalMethod();
+            Class<?>[] parameterTypes = functionalMethod.getParameterTypes();
+
+            if (parameterTypes.length > existingCallbackArgumentCache.length) {
+                callbackArgumentCacheField.set(null, new Object[parameterTypes.length]);
+            }
+
+            DynamicType.Unloaded<Object> dynamicType = new ByteBuddy()
+                    .subclass(Object.class)
+                    .implement(Function.class)
+                    .name("net.civex4.nobilitypatch.callback.$NobilityPatchCallbackForwarder$" + key.getId())
+                    .defineField("callback", interfaceType, Modifier.PRIVATE | Modifier.FINAL)
+                    .defineConstructor(Modifier.PUBLIC).withParameters(interfaceType).intercept(new Implementation() {
+                        @Override
+                        public InstrumentedType prepare(InstrumentedType instrumentedType) {
+                            return instrumentedType;
+                        }
+
+                        @Override
+                        public ByteCodeAppender appender(Target implementationTarget) {
+                            return new ByteCodeAppender.Simple(
+                                    MethodVariableAccess.loadThis(),
+                                    implementationTarget.invokeSuper(implementationTarget.getInstrumentedType().getSuperClass().getDeclaredMethods().filter(ElementMatchers.isDefaultConstructor()).getOnly().asSignatureToken()),
+                                    MethodVariableAccess.loadThis(),
+                                    MethodVariableAccess.REFERENCE.loadFrom(1),
+                                    FieldAccess.forField(implementationTarget.getInstrumentedType().getDeclaredFields().getOnly()).write()
+                            );
+                        }
+                    })
+                    .defineMethod("apply", Object.class, Modifier.PUBLIC).withParameters(Object.class).intercept(new Implementation() {
+                        @Override
+                        public InstrumentedType prepare(InstrumentedType instrumentedType) {
+                            return instrumentedType;
+                        }
+
+                        @Override
+                        public ByteCodeAppender appender(Target implementationTarget) {
+                            List<StackManipulation> manipulations = new ArrayList<>();
+                            manipulations.add(MethodVariableAccess.loadThis());
+                            manipulations.add(FieldAccess.forField(implementationTarget.getInstrumentedType().getDeclaredFields().getOnly()).read());
+
+                            if (parameterTypes.length != 0) {
+                                manipulations.add(MethodVariableAccess.REFERENCE.loadFrom(1));
+                                TypeDescription objectArrayType = TypeDescription.ForLoadedType.of(Object[].class);
+                                manipulations.add(TypeCasting.to(objectArrayType));
+                                for (int i = 0; i < parameterTypes.length; i++) {
+                                    if (i != parameterTypes.length - 1) {
+                                        manipulations.add(Duplication.SINGLE);
+                                    }
+                                    manipulations.add(IntegerConstant.forValue(i));
+                                    manipulations.add(ArrayAccess.of(objectArrayType).load());
+                                    if (parameterTypes[i] != Object.class) {
+                                        manipulations.add(TypeCasting.to(TypeDescription.ForLoadedType.of(parameterTypes[i])));
+                                    }
+                                    if (i != parameterTypes.length - 1) {
+                                        manipulations.add(new StackManipulation() {
+                                            @Override
+                                            public boolean isValid() {
+                                                return true;
+                                            }
+
+                                            @Override
+                                            public Size apply(MethodVisitor methodVisitor,
+                                                              Context implementationContext) {
+                                                methodVisitor.visitInsn(Opcodes.SWAP);
+                                                return StackSize.SINGLE.toIncreasingSize();
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            manipulations.add(MethodInvocation.invoke(new MethodDescription.ForLoadedMethod(functionalMethod)));
+                            if (functionalMethod.getReturnType() == void.class) {
+                                manipulations.add(NullConstant.INSTANCE);
+                            }
+                            manipulations.add(MethodReturn.of(TypeDescription.OBJECT));
+
+                            return new ByteCodeAppender.Simple(manipulations.toArray(new StackManipulation[0]));
+                        }
+                    })
+                    .make();
+            if (EXPORT_CLASSES) {
+                exportClass(dynamicType.getTypeDescription().getInternalName(), dynamicType.getBytes());
+            }
+            Function callbackForwarder = (Function) dynamicType
+                    .load(interfaceType.getClassLoader())
+                    .getLoaded()
+                    .getConstructor(interfaceType)
+                    .newInstance(callbackInstance);
+
+            Field callbacksField = agentClass.getField("callbacks");
+            Function[] callbacks = (Function[]) callbacksField.get(null);
+            if (key.getId() >= callbacks.length) {
+                Function[] newCallbacks = new Function[key.getId() + 1];
+                System.arraycopy(callbacks, 0, newCallbacks, 0, callbacks.length);
+                newCallbacks[key.getId()] = callbackForwarder;
+                callbacksField.set(null, newCallbacks);
+            }
         } catch (ReflectiveOperationException e) {
             throw new RuntimeException("Failed to register callback", e);
         }
+
         return key;
     }
 
-    public static void loadCallback(MethodVisitor mv, CallbackKey<?> key) {
-        mv.visitFieldInsn(Opcodes.GETSTATIC, Type.getInternalName(Bukkit.class), key.getFieldName(), Type.getDescriptor(Object.class));
-        mv.visitTypeInsn(Opcodes.CHECKCAST, Type.getInternalName(key.getType()));
+    public static void invokeCallback(MethodVisitor mv, CallbackKey<?> key) {
+        for (int i = 0; i < key.getFunctionalMethod().getParameterTypes().length; i++) {
+            mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
+            mv.visitInsn(Opcodes.SWAP);
+            mv.visitInsn(Opcodes.AASTORE);
+        }
+        mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbacks", "[Ljava/util/function/Function;");
+        IntegerConstant.forValue(key.getId()).apply(mv, null);
+        mv.visitInsn(Opcodes.AALOAD);
+        mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
+        mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true);
+        if (key.getFunctionalMethod().getReturnType() == void.class) {
+            mv.visitInsn(Opcodes.POP);
+        }
     }
 
     @Override
