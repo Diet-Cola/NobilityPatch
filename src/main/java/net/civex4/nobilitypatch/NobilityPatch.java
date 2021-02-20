@@ -7,6 +7,7 @@ import net.bytebuddy.description.method.MethodDescription;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.dynamic.DynamicType;
 import net.bytebuddy.dynamic.scaffold.InstrumentedType;
+import net.bytebuddy.dynamic.scaffold.subclass.ConstructorStrategy;
 import net.bytebuddy.implementation.Implementation;
 import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
 import net.bytebuddy.implementation.bytecode.Duplication;
@@ -118,10 +119,14 @@ public final class NobilityPatch extends JavaPlugin {
     }
 
     public static void transform(Class<?> clazz, UnaryOperator<ClassVisitor> transformer) {
+        String internalName = Type.getInternalName(clazz);
         ClassFileTransformer classFileTransformer = new ClassFileTransformer() {
             @Override
             public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                                     ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+                if (!internalName.equals(className)) {
+                    return classfileBuffer;
+                }
                 ClassReader reader = new ClassReader(classfileBuffer);
                 ClassWriter writer = new ClassWriter(0);
                 ClassVisitor visitor = transformer.apply(writer);
@@ -186,7 +191,7 @@ public final class NobilityPatch extends JavaPlugin {
             }
 
             DynamicType.Unloaded<Object> dynamicType = new ByteBuddy()
-                    .subclass(Object.class)
+                    .subclass(Object.class, ConstructorStrategy.Default.NO_CONSTRUCTORS)
                     .implement(Function.class)
                     .name("net.civex4.nobilitypatch.callback.$NobilityPatchCallbackForwarder$" + key.getId())
                     .defineField("callback", interfaceType, Modifier.PRIVATE | Modifier.FINAL)
@@ -203,7 +208,8 @@ public final class NobilityPatch extends JavaPlugin {
                                     implementationTarget.invokeSuper(implementationTarget.getInstrumentedType().getSuperClass().getDeclaredMethods().filter(ElementMatchers.isDefaultConstructor()).getOnly().asSignatureToken()),
                                     MethodVariableAccess.loadThis(),
                                     MethodVariableAccess.REFERENCE.loadFrom(1),
-                                    FieldAccess.forField(implementationTarget.getInstrumentedType().getDeclaredFields().getOnly()).write()
+                                    FieldAccess.forField(implementationTarget.getInstrumentedType().getDeclaredFields().getOnly()).write(),
+                                    MethodReturn.VOID
                             );
                         }
                     })
@@ -284,8 +290,10 @@ public final class NobilityPatch extends JavaPlugin {
     }
 
     public static void invokeCallback(MethodVisitor mv, CallbackKey<?> key) {
-        for (int i = 0; i < key.getFunctionalMethod().getParameterTypes().length; i++) {
+        for (int i = key.getFunctionalMethod().getParameterTypes().length - 1; i >= 0; i--) {
             mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
+            mv.visitInsn(Opcodes.SWAP);
+            IntegerConstant.forValue(i).apply(mv, null);
             mv.visitInsn(Opcodes.SWAP);
             mv.visitInsn(Opcodes.AASTORE);
         }
@@ -294,8 +302,11 @@ public final class NobilityPatch extends JavaPlugin {
         mv.visitInsn(Opcodes.AALOAD);
         mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
         mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true);
-        if (key.getFunctionalMethod().getReturnType() == void.class) {
+        Class<?> returnType = key.getFunctionalMethod().getReturnType();
+        if (returnType == void.class) {
             mv.visitInsn(Opcodes.POP);
+        } else if (returnType != Object.class) {
+            mv.visitTypeInsn(Opcodes.CHECKCAST, returnType.isArray() ? Type.getDescriptor(returnType) : Type.getInternalName(returnType));
         }
     }
 
