@@ -1,6 +1,7 @@
 package net.civex4.nobilitypatch;
 
 import com.google.common.io.ByteStreams;
+import com.google.common.primitives.Primitives;
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.agent.ByteBuddyAgent;
 import net.bytebuddy.description.method.MethodDescription;
@@ -13,7 +14,10 @@ import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
 import net.bytebuddy.implementation.bytecode.Duplication;
 import net.bytebuddy.implementation.bytecode.StackManipulation;
 import net.bytebuddy.implementation.bytecode.StackSize;
+import net.bytebuddy.implementation.bytecode.assign.Assigner;
 import net.bytebuddy.implementation.bytecode.assign.TypeCasting;
+import net.bytebuddy.implementation.bytecode.assign.primitive.PrimitiveBoxingDelegate;
+import net.bytebuddy.implementation.bytecode.assign.primitive.PrimitiveUnboxingDelegate;
 import net.bytebuddy.implementation.bytecode.collection.ArrayAccess;
 import net.bytebuddy.implementation.bytecode.constant.IntegerConstant;
 import net.bytebuddy.implementation.bytecode.constant.NullConstant;
@@ -236,7 +240,10 @@ public final class NobilityPatch extends JavaPlugin {
                                     manipulations.add(IntegerConstant.forValue(i));
                                     manipulations.add(ArrayAccess.of(objectArrayType).load());
                                     if (parameterTypes[i] != Object.class) {
-                                        manipulations.add(TypeCasting.to(TypeDescription.ForLoadedType.of(parameterTypes[i])));
+                                        manipulations.add(TypeCasting.to(TypeDescription.ForLoadedType.of(Primitives.wrap(parameterTypes[i]))));
+                                        if (parameterTypes[i].isPrimitive()) {
+                                            manipulations.add(PrimitiveUnboxingDelegate.forPrimitive(TypeDescription.ForLoadedType.of(parameterTypes[i])));
+                                        }
                                     }
                                     if (i != parameterTypes.length - 1) {
                                         manipulations.add(new StackManipulation() {
@@ -256,8 +263,13 @@ public final class NobilityPatch extends JavaPlugin {
                                 }
                             }
                             manipulations.add(MethodInvocation.invoke(new MethodDescription.ForLoadedMethod(functionalMethod)));
-                            if (functionalMethod.getReturnType() == void.class) {
-                                manipulations.add(NullConstant.INSTANCE);
+                            if (functionalMethod.getReturnType().isPrimitive()) {
+                                if (functionalMethod.getReturnType() == void.class) {
+                                    manipulations.add(NullConstant.INSTANCE);
+                                } else {
+                                    manipulations.add(PrimitiveBoxingDelegate.forPrimitive(TypeDescription.ForLoadedType.of(functionalMethod.getReturnType()))
+                                            .assignBoxedTo(TypeDescription.ForLoadedType.of(Primitives.wrap(functionalMethod.getReturnType())).asGenericType(), Assigner.DEFAULT, Assigner.Typing.STATIC));
+                                }
                             }
                             manipulations.add(MethodReturn.of(TypeDescription.OBJECT));
 
@@ -290,11 +302,17 @@ public final class NobilityPatch extends JavaPlugin {
     }
 
     public static void invokeCallback(MethodVisitor mv, CallbackKey<?> key) {
-        for (int i = key.getFunctionalMethod().getParameterTypes().length - 1; i >= 0; i--) {
+        Class<?>[] parameterTypes = key.getFunctionalMethod().getParameterTypes();
+        for (int i = parameterTypes.length - 1; i >= 0; i--) {
             mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
             mv.visitInsn(Opcodes.SWAP);
             IntegerConstant.forValue(i).apply(mv, null);
             mv.visitInsn(Opcodes.SWAP);
+            if (parameterTypes[i].isPrimitive()) {
+                PrimitiveBoxingDelegate.forPrimitive(TypeDescription.ForLoadedType.of(parameterTypes[i]))
+                        .assignBoxedTo(TypeDescription.ForLoadedType.of(Primitives.wrap(parameterTypes[i])).asGenericType(), Assigner.DEFAULT, Assigner.Typing.STATIC)
+                        .apply(mv, null);
+            }
             mv.visitInsn(Opcodes.AASTORE);
         }
         mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbacks", "[Ljava/util/function/Function;");
@@ -306,7 +324,10 @@ public final class NobilityPatch extends JavaPlugin {
         if (returnType == void.class) {
             mv.visitInsn(Opcodes.POP);
         } else if (returnType != Object.class) {
-            mv.visitTypeInsn(Opcodes.CHECKCAST, returnType.isArray() ? Type.getDescriptor(returnType) : Type.getInternalName(returnType));
+            mv.visitTypeInsn(Opcodes.CHECKCAST, returnType.isArray() ? Type.getDescriptor(returnType) : Type.getInternalName(Primitives.wrap(returnType)));
+            if (returnType.isPrimitive()) {
+                PrimitiveUnboxingDelegate.forPrimitive(TypeDescription.ForLoadedType.of(returnType)).apply(mv, null);
+            }
         }
     }
 
