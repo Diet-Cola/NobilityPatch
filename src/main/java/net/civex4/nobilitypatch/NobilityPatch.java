@@ -148,7 +148,6 @@ public final class NobilityPatch extends JavaPlugin {
         } catch (UnmodifiableClassException e) {
             Bukkit.getLogger().log(Level.SEVERE, "Could not transform unmodifiable class " + clazz.getName(), e);
         }
-        instrumentation.removeTransformer(classFileTransformer);
     }
 
     public static void transformMethod(Method method, UnaryOperator<MethodVisitor> methodTransformer) {
