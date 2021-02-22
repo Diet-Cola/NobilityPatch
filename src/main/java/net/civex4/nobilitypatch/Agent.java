@@ -8,7 +8,7 @@ public class Agent {
 
     @SuppressWarnings("unchecked")
     public static Function<Object[], Object>[] callbacks = new Function[0];
-    public static Object[] callbackArgumentCache = new Object[0];
+    public static ThreadLocal<Object[]> callbackArgumentCache = ThreadLocal.withInitial(() -> new Object[0]);
 
     public static void agentmain(String s, Instrumentation instrumentation) {
         Agent.instrumentation = instrumentation;

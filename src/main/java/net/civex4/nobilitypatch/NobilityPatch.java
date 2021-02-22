@@ -12,8 +12,8 @@ import net.bytebuddy.dynamic.scaffold.subclass.ConstructorStrategy;
 import net.bytebuddy.implementation.Implementation;
 import net.bytebuddy.implementation.bytecode.ByteCodeAppender;
 import net.bytebuddy.implementation.bytecode.Duplication;
+import net.bytebuddy.implementation.bytecode.Removal;
 import net.bytebuddy.implementation.bytecode.StackManipulation;
-import net.bytebuddy.implementation.bytecode.StackSize;
 import net.bytebuddy.implementation.bytecode.assign.Assigner;
 import net.bytebuddy.implementation.bytecode.assign.TypeCasting;
 import net.bytebuddy.implementation.bytecode.assign.primitive.PrimitiveBoxingDelegate;
@@ -184,13 +184,13 @@ public final class NobilityPatch extends JavaPlugin {
         try {
             Class<?> agentClass = Class.forName(AGENT_CLASS_NAME, false, Bukkit.class.getClassLoader());
             Field callbackArgumentCacheField = agentClass.getField("callbackArgumentCache");
-            Object[] existingCallbackArgumentCache = (Object[]) callbackArgumentCacheField.get(null);
+            Object[] existingCallbackArgumentCache = (Object[]) ((ThreadLocal) callbackArgumentCacheField.get(null)).get();
 
             Method functionalMethod = key.getFunctionalMethod();
             Class<?>[] parameterTypes = functionalMethod.getParameterTypes();
 
             if (parameterTypes.length > existingCallbackArgumentCache.length) {
-                callbackArgumentCacheField.set(null, new Object[parameterTypes.length]);
+                callbackArgumentCacheField.set(null, ThreadLocal.withInitial(() -> new Object[parameterTypes.length]));
             }
 
             DynamicType.Unloaded<Object> dynamicType = new ByteBuddy()
@@ -233,6 +233,7 @@ public final class NobilityPatch extends JavaPlugin {
                                 TypeDescription objectArrayType = TypeDescription.ForLoadedType.of(Object[].class);
                                 manipulations.add(TypeCasting.to(objectArrayType));
                                 for (int i = 0; i < parameterTypes.length; i++) {
+                                    TypeDescription parameterType = TypeDescription.ForLoadedType.of(parameterTypes[i]);
                                     if (i != parameterTypes.length - 1) {
                                         manipulations.add(Duplication.SINGLE);
                                     }
@@ -241,23 +242,12 @@ public final class NobilityPatch extends JavaPlugin {
                                     if (parameterTypes[i] != Object.class) {
                                         manipulations.add(TypeCasting.to(TypeDescription.ForLoadedType.of(Primitives.wrap(parameterTypes[i]))));
                                         if (parameterTypes[i].isPrimitive()) {
-                                            manipulations.add(PrimitiveUnboxingDelegate.forPrimitive(TypeDescription.ForLoadedType.of(parameterTypes[i])));
+                                            manipulations.add(PrimitiveUnboxingDelegate.forPrimitive(parameterType));
                                         }
                                     }
                                     if (i != parameterTypes.length - 1) {
-                                        manipulations.add(new StackManipulation() {
-                                            @Override
-                                            public boolean isValid() {
-                                                return true;
-                                            }
-
-                                            @Override
-                                            public Size apply(MethodVisitor methodVisitor,
-                                                              Context implementationContext) {
-                                                methodVisitor.visitInsn(Opcodes.SWAP);
-                                                return StackSize.SINGLE.toIncreasingSize();
-                                            }
-                                        });
+                                        manipulations.add(Duplication.of(parameterType).flipOver(TypeDescription.ForLoadedType.of(Object[].class)));
+                                        manipulations.add(Removal.of(parameterType));
                                     }
                                 }
                             }
@@ -302,11 +292,25 @@ public final class NobilityPatch extends JavaPlugin {
 
     public static void invokeCallback(MethodVisitor mv, CallbackKey<?> key) {
         Class<?>[] parameterTypes = key.getFunctionalMethod().getParameterTypes();
+        mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "Ljava/lang/ThreadLocal;");
+        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/ThreadLocal", "get", "()Ljava/lang/Object;", false);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "[Ljava/lang/Object;");
         for (int i = parameterTypes.length - 1; i >= 0; i--) {
-            mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
-            mv.visitInsn(Opcodes.SWAP);
+            if (parameterTypes[i] == double.class || parameterTypes[i] == long.class) {
+                mv.visitInsn(Opcodes.DUP_X2);
+                mv.visitInsn(Opcodes.DUP_X2);
+                mv.visitInsn(Opcodes.POP);
+            } else {
+                mv.visitInsn(Opcodes.DUP_X1);
+                mv.visitInsn(Opcodes.SWAP);
+            }
             IntegerConstant.forValue(i).apply(mv, null);
-            mv.visitInsn(Opcodes.SWAP);
+            if (parameterTypes[i] == double.class || parameterTypes[i] == long.class) {
+                mv.visitInsn(Opcodes.DUP_X2);
+                mv.visitInsn(Opcodes.POP);
+            } else {
+                mv.visitInsn(Opcodes.SWAP);
+            }
             if (parameterTypes[i].isPrimitive()) {
                 PrimitiveBoxingDelegate.forPrimitive(TypeDescription.ForLoadedType.of(parameterTypes[i]))
                         .assignBoxedTo(TypeDescription.ForLoadedType.of(Primitives.wrap(parameterTypes[i])).asGenericType(), Assigner.DEFAULT, Assigner.Typing.STATIC)
@@ -317,7 +321,7 @@ public final class NobilityPatch extends JavaPlugin {
         mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbacks", "[Ljava/util/function/Function;");
         IntegerConstant.forValue(key.getId()).apply(mv, null);
         mv.visitInsn(Opcodes.AALOAD);
-        mv.visitFieldInsn(Opcodes.GETSTATIC, AGENT_CLASS_NAME.replace('.', '/'), "callbackArgumentCache", "[Ljava/lang/Object;");
+        mv.visitInsn(Opcodes.SWAP);
         mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, "java/util/function/Function", "apply", "(Ljava/lang/Object;)Ljava/lang/Object;", true);
         Class<?> returnType = key.getFunctionalMethod().getReturnType();
         if (returnType == void.class) {
